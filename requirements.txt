@@ -6,3 +6,5 @@ openpyxl
 rapidfuzz
 requests
 python-dotenv
+pytesseract
+Pillow
