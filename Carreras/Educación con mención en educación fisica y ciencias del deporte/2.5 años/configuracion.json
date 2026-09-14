@@ -1,0 +1,9 @@
+{
+  "nombre": "Educación Secundaria con mención en Educación Física y Ciencias del Deporte - 2.5 años",
+  "formato": "formato.docx",
+  "archivo_alumnos": "alumnos.xlsx",
+  "anios_convalidables": 2.5,
+  "ciclos_convalidables": 5,
+  "formato_especial_educacion": true,
+  "modalidad": "A DISTANCIA"
+}

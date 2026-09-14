@@ -1,0 +1,8 @@
+streamlit
+pandas
+PyMuPDF
+python-docx
+openpyxl
+rapidfuzz
+requests
+python-dotenv
