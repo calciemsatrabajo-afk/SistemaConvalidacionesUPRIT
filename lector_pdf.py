@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import shutil
 
 import pymupdf
 import pytesseract
@@ -14,16 +15,28 @@ from deepseek_lector import interpretar_certificado
 # CONFIGURACIÓN DE TESSERACT
 # ============================================================
 
-RUTA_TESSERACT_WINDOWS = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
+def configurar_tesseract():
+    """Configura Tesseract automáticamente en Windows y Linux/Streamlit Cloud."""
+    ruta_windows = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-if os.path.exists(
-    RUTA_TESSERACT_WINDOWS
-):
-    pytesseract.pytesseract.tesseract_cmd = (
-        RUTA_TESSERACT_WINDOWS
+    # Windows local
+    if os.path.exists(ruta_windows):
+        pytesseract.pytesseract.tesseract_cmd = ruta_windows
+        return ruta_windows
+
+    # Linux / Streamlit Community Cloud / otros sistemas
+    ruta_sistema = shutil.which("tesseract")
+    if ruta_sistema:
+        pytesseract.pytesseract.tesseract_cmd = ruta_sistema
+        return ruta_sistema
+
+    raise RuntimeError(
+        "Tesseract OCR no está instalado o no se pudo localizar. "
+        "En Streamlit Cloud agrega 'tesseract-ocr' y 'tesseract-ocr-spa' a packages.txt."
     )
+
+
+RUTA_TESSERACT = configurar_tesseract()
 
 
 # ============================================================
@@ -408,8 +421,8 @@ def extraer_ocr_alto_contraste(
 
     except pytesseract.TesseractNotFoundError as error:
         raise RuntimeError(
-            "Tesseract no está instalado o no se encontró en "
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            "Tesseract OCR no está disponible en este entorno. "
+            f"Ruta configurada: {getattr(pytesseract.pytesseract, 'tesseract_cmd', 'no detectada')}"
         ) from error
 
     except Exception:
@@ -837,8 +850,8 @@ def extraer_ocr_multivista(
     except pytesseract.TesseractNotFoundError as error:
 
         raise RuntimeError(
-            "Tesseract no está instalado o no se encontró en "
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            "Tesseract OCR no está disponible en este entorno. "
+            f"Ruta configurada: {getattr(pytesseract.pytesseract, 'tesseract_cmd', 'no detectada')}"
         ) from error
 
     except Exception as error:
