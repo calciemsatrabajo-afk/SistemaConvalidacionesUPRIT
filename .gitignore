@@ -5,3 +5,4 @@ __pycache__/
 credentials.json
 tokens_google/
 .streamlit/secrets.toml
+resultados/

@@ -2,7 +2,7 @@ import streamlit as st
 from openai import OpenAI
 
 client = OpenAI(
-    api_key=st.secrets["DEEPSEEK_API_KEY"],
+    api_key=st.secrets["sk-a5922458521f44bfa1150146a3ba39fc"],
     base_url="https://api.deepseek.com"
 )
 

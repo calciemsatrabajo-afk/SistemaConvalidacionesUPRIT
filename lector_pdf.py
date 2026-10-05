@@ -8,6 +8,13 @@ import pytesseract
 
 from PIL import Image, ImageOps
 
+try:
+    import cv2
+    import numpy as np
+except Exception:
+    cv2 = None
+    np = None
+
 from deepseek_lector import interpretar_certificado
 
 
@@ -44,6 +51,181 @@ RUTA_TESSERACT = configurar_tesseract()
 # ============================================================
 
 MINIMO_CARACTERES_TEXTO_DIGITAL = 40
+
+
+
+# ============================================================
+# OCR ESPECIAL PARA CERTIFICADOS CON TABLAS
+# Elimina líneas de la tabla antes de reconocer texto.
+# ============================================================
+
+def extraer_ocr_tabla_sin_lineas(pagina):
+    """
+    Mejora certificados escaneados con cuadrículas.
+    No reemplaza el OCR normal: agrega una vista adicional para DeepSeek
+    y para la recuperación de notas.
+    """
+    if cv2 is None or np is None:
+        return ""
+
+    matriz = pymupdf.Matrix(4, 4)
+    pix = pagina.get_pixmap(matrix=matriz, alpha=False)
+
+    canales = pix.n
+    arr = np.frombuffer(pix.samples, dtype=np.uint8)
+    arr = arr.reshape(pix.height, pix.width, canales)
+
+    if canales >= 3:
+        rgb = arr[:, :, :3]
+        gris = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    else:
+        gris = arr[:, :, 0]
+
+    # Binarización robusta.
+    binaria = cv2.threshold(
+        gris, 0, 255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )[1]
+
+    # Eliminar líneas horizontales y verticales largas.
+    ancho = max(40, pix.width // 40)
+    alto = max(40, pix.height // 55)
+
+    horizontal = cv2.morphologyEx(
+        binaria,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (ancho, 1))
+    )
+    vertical = cv2.morphologyEx(
+        binaria,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, alto))
+    )
+
+    lineas = cv2.bitwise_or(horizontal, vertical)
+    limpio = cv2.bitwise_and(
+        binaria,
+        cv2.bitwise_not(lineas)
+    )
+    limpio = 255 - limpio
+
+    texto = pytesseract.image_to_string(
+        limpio,
+        lang="spa",
+        config="--oem 3 --psm 6"
+    )
+
+    return limpiar_texto_extraido(texto)
+
+
+_MAPA_NOTA_LETRAS_TABLA = {
+    "DIEZ": 10,
+    "ONCE": 11,
+    "DOCE": 12,
+    "TRECE": 13,
+    "CATORCE": 14,
+    "QUINCE": 15,
+    "DIECISEIS": 16,
+    "DIECISIETE": 17,
+    "DIECIOCHO": 18,
+    "DIECINUEVE": 19,
+    "VEINTE": 20,
+}
+
+
+def _norm_tabla(texto):
+    texto = str(texto or "").upper()
+    for a, b in (
+        ("Á", "A"), ("É", "E"), ("Í", "I"),
+        ("Ó", "O"), ("Ú", "U"), ("Ü", "U")
+    ):
+        texto = texto.replace(a, b)
+    texto = re.sub(r"[^A-Z0-9 ]+", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def _similitud_tokens_tabla(a, b):
+    pa = [x for x in _norm_tabla(a).split() if len(x) >= 3]
+    pb = set(_norm_tabla(b).split())
+    if not pa:
+        return 0.0
+    return sum(1 for x in pa if x in pb) / len(pa)
+
+
+def completar_notas_desde_ocr_tabla(resultado, textos_tabla):
+    """
+    SOLO completa notas faltantes de cursos que YA EXISTEN.
+    No crea ni duplica cursos.
+    Prioriza la nota escrita en letras de la misma línea.
+    """
+    if not isinstance(resultado, dict):
+        return resultado
+
+    cursos = resultado.get("cursos", [])
+    if not isinstance(cursos, list):
+        return resultado
+
+    lineas = []
+    for texto in textos_tabla:
+        for linea in str(texto or "").splitlines():
+            linea = _norm_tabla(linea)
+            if linea:
+                lineas.append(linea)
+
+    for item in cursos:
+        if not isinstance(item, dict):
+            continue
+        if item.get("nota") is not None:
+            continue
+
+        nombre = item.get("curso", "")
+        candidatos = []
+
+        for linea in lineas:
+            score = _similitud_tokens_tabla(nombre, linea)
+            if score < 0.60:
+                continue
+
+            tokens = set(linea.split())
+            notas_letras = [
+                nota
+                for palabra, nota in _MAPA_NOTA_LETRAS_TABLA.items()
+                if palabra in tokens
+            ]
+
+            # La palabra escrita es la evidencia principal.
+            if len(set(notas_letras)) == 1:
+                candidatos.append(
+                    (score + 0.25, notas_letras[0])
+                )
+                continue
+
+            # Respaldo: número 10..20 presente en la misma línea.
+            numeros = []
+            for token in linea.split():
+                m = re.fullmatch(r"(1[0-9]|20)(?:00)?", token)
+                if m:
+                    numeros.append(int(m.group(1)))
+
+            if len(set(numeros)) == 1:
+                candidatos.append((score, numeros[0]))
+
+        if not candidatos:
+            continue
+
+        candidatos.sort(key=lambda x: x[0], reverse=True)
+        mejor_score = candidatos[0][0]
+
+        notas = {
+            nota
+            for score, nota in candidatos
+            if score >= mejor_score - 0.03
+        }
+
+        if len(notas) == 1:
+            item["nota"] = notas.pop()
+
+    return resultado
 
 
 # ============================================================
@@ -107,6 +289,7 @@ def leer_pdf(
     # Se conserva separado porque, además de enviarse a DeepSeek,
     # Python lo usa al final para recuperar notas faltantes del MISMO curso.
     textos_alto_contraste = []
+    textos_tabla_sin_lineas = []
 
     try:
 
@@ -114,6 +297,19 @@ def leer_pdf(
             documento,
             start=1
         ):
+
+            # Vista especial para certificados con tablas/cuadrículas.
+            # Las líneas se eliminan antes del OCR para que curso y nota
+            # permanezcan en la misma fila textual.
+            try:
+                texto_tabla = extraer_ocr_tabla_sin_lineas(pagina)
+            except Exception:
+                texto_tabla = ""
+
+            if texto_tabla:
+                textos_tabla_sin_lineas.append(
+                    texto_tabla
+                )
 
             texto_digital = extraer_texto_digital(
                 pagina
@@ -136,6 +332,26 @@ def leer_pdf(
                         f"{texto_pagina}"
                     )
                 )
+
+                # El PDF puede tener texto digital parcial y la tabla como
+                # imagen. Ejecutar también OCR visual evita perder cursos.
+                vistas_respaldo = extraer_ocr_multivista(
+                    pagina
+                )
+
+                for nombre_vista, etiqueta_vista in (
+                    ("principal", "OCR RESPALDO PSM6"),
+                    ("auxiliar", "OCR RESPALDO PSM4"),
+                    ("disperso", "OCR RESPALDO PSM11"),
+                ):
+                    texto_vista = limpiar_texto_extraido(
+                        vistas_respaldo.get(nombre_vista, "")
+                    )
+                    if texto_vista:
+                        texto_paginas.append(
+                            f"--- PÁGINA {numero_pagina} | {etiqueta_vista} ---\n"
+                            f"{texto_vista}"
+                        )
 
                 # Respaldo visual de alto contraste.
                 texto_ac = extraer_ocr_alto_contraste(
@@ -196,6 +412,13 @@ def leer_pdf(
                 )
             )
 
+            texto_disperso = limpiar_texto_extraido(
+                vistas_ocr.get(
+                    "disperso",
+                    ""
+                )
+            )
+
             texto_calificacion = limpiar_texto_extraido(
                 vistas_ocr.get(
                     "calificacion",
@@ -220,12 +443,33 @@ def leer_pdf(
                 )
             ]
 
+            # Agregar también la vista OCR de tabla sin líneas.
+            # Aquí `secciones` ya existe, evitando UnboundLocalError.
+            if texto_tabla:
+                secciones.append(
+                    (
+                        f"--- PÁGINA {numero_pagina} | "
+                        f"OCR TABLA SIN LÍNEAS ---\n"
+                        f"{texto_tabla}"
+                    )
+                )
+
+
             if texto_auxiliar:
                 secciones.append(
                     (
                         f"--- PÁGINA {numero_pagina} | "
                         f"OCR AUXILIAR PSM4 ---\n"
                         f"{texto_auxiliar}"
+                    )
+                )
+
+            if texto_disperso:
+                secciones.append(
+                    (
+                        f"--- PÁGINA {numero_pagina} | "
+                        f"OCR TEXTO DISPERSO PSM11 ---\n"
+                        f"{texto_disperso}"
                     )
                 )
 
@@ -262,6 +506,7 @@ def leer_pdf(
                     (
                         len(texto_principal)
                         + len(texto_auxiliar)
+                        + len(texto_disperso)
                         + len(texto_calificacion)
                     ),
                 "ocr_principal":
@@ -297,6 +542,13 @@ def leer_pdf(
 
     datos = interpretar_certificado(
         texto_completo
+    )
+
+    # Rescate final para tablas escaneadas:
+    # únicamente completa notas faltantes de cursos ya detectados.
+    datos = completar_notas_desde_ocr_tabla(
+        datos,
+        textos_tabla_sin_lineas
     )
 
     datos = normalizar_resultado_interpretacion(
@@ -829,6 +1081,12 @@ def extraer_ocr_multivista(
             config="--oem 3 --psm 4"
         )
 
+        texto_disperso = pytesseract.image_to_string(
+            imagen,
+            lang="spa",
+            config="--oem 3 --psm 11"
+        )
+
         texto_calificacion = (
             extraer_columna_calificacion(
                 imagen
@@ -841,6 +1099,9 @@ def extraer_ocr_multivista(
                 or "",
             "auxiliar":
                 texto_auxiliar
+                or "",
+            "disperso":
+                texto_disperso
                 or "",
             "calificacion":
                 texto_calificacion

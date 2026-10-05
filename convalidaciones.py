@@ -383,7 +383,7 @@ def analizar_convalidaciones(
     Orden de decisión:
     1. coincidencia exacta;
     2. coincidencia por nombre muy similar;
-    3. equivalencias determinísticas por carrera con afinidad DIRECTA/ALTA/MEDIA/BAJA y asignación global;
+    3. equivalencias determinísticas seguras;
     4. equivalencia semántica con DeepSeek;
     5. evaluación por competencias;
     6. cálculo de nota convalidante;
@@ -2334,211 +2334,106 @@ def buscar_equivalencias_respaldo(
     usados_destino=None,
     reglas=None
 ):
-    """
-    Busca equivalencias determinísticas generales y específicas por carrera.
 
-    COMPATIBILIDAD:
-    - Admite el formato antiguo:
-          "CURSO DESTINO": ["ALIAS 1", "ALIAS 2"]
-    - Admite el formato nuevo por afinidad:
-          "CURSO DESTINO": {
-              "DIRECTA": [...],
-              "ALTA": [...],
-              "MEDIA": [...],
-              "BAJA": [...]
-          }
-
-    La selección se realiza GLOBALMENTE por puntaje para evitar que una
-    asignatura de origen valiosa sea consumida por la primera fila compatible.
-    Un curso de origen y uno de destino solo pueden utilizarse una vez.
-    """
-
-    usados_origen = set(usados_origen or [])
-    usados_destino = set(usados_destino or [])
-    reglas = reglas or {}
-
-    puntajes_default = {
-        "DIRECTA": 100,
-        "MUY ALTA": 95,
-        "ALTA": 85,
-        "MEDIA": 65,
-        "BAJA": 40,
-    }
-
-    puntajes_reglas = reglas.get("puntajes_afinidad", {})
-    if isinstance(puntajes_reglas, dict):
-        for nivel, valor in puntajes_reglas.items():
-            try:
-                puntajes_default[normalizar(nivel)] = int(valor)
-            except (TypeError, ValueError):
-                pass
-
-    permitir_baja = bool(
-        reglas.get("permitir_afinidad_baja", True)
+    usados_origen = set(
+        usados_origen
+        or []
     )
 
-    # mapa:
-    # destino normalizado -> origen normalizado -> metadatos de afinidad
-    mapa = defaultdict(dict)
+    usados_destino = set(
+        usados_destino
+        or []
+    )
 
-    def registrar(destino, origen, nivel="ALTA", fuente="GENERAL"):
-        destino_n = normalizar(destino)
-        origen_n = normalizar(origen)
-        nivel_n = normalizar(nivel) or "ALTA"
+    resultado = []
 
-        if not destino_n or not origen_n:
-            return
+    mapa_alias = {}
 
-        if nivel_n == "BAJA" and not permitir_baja:
-            return
+    # Equivalencias generales del motor.
+    equivalencias_combinadas = dict(
+        EQUIVALENCIAS_RESPALDO
+    )
 
-        puntaje = puntajes_default.get(nivel_n, 60)
+    # Equivalencias específicas de la carrera.
+    reglas = reglas or {}
 
-        actual = mapa[destino_n].get(origen_n)
-        if (
-            actual is None
-            or puntaje > actual["puntaje"]
-        ):
-            mapa[destino_n][origen_n] = {
-                "nivel": nivel_n,
-                "puntaje": puntaje,
-                "fuente": fuente,
-            }
-
-    # --------------------------------------------------------
-    # 1) Equivalencias generales del motor
-    # --------------------------------------------------------
-    for destino, alias in EQUIVALENCIAS_RESPALDO.items():
-        registrar(
-            destino,
-            destino,
-            nivel="DIRECTA",
-            fuente="GENERAL"
-        )
-
-        valores = (
-            alias
-            if isinstance(alias, (list, tuple, set))
-            else [alias]
-        )
-
-        for origen in valores:
-            registrar(
-                destino,
-                origen,
-                nivel="ALTA",
-                fuente="GENERAL"
-            )
-
-    # --------------------------------------------------------
-    # 2) Equivalencias específicas de la carrera
-    # --------------------------------------------------------
     equivalencias_carrera = reglas.get(
         "equivalencias_orientativas",
         {}
     )
 
-    # Algunas reglas nuevas conservan además la estructura jerárquica
-    # bajo este nombre. Se prioriza cuando está disponible.
-    equivalencias_por_afinidad = reglas.get(
-        "equivalencias_por_afinidad",
-        {}
-    )
-
-    if (
-        isinstance(equivalencias_por_afinidad, dict)
-        and equivalencias_por_afinidad
+    if isinstance(
+        equivalencias_carrera,
+        dict
     ):
-        equivalencias_carrera = equivalencias_por_afinidad
-
-    if isinstance(equivalencias_carrera, dict):
-        for destino, configuracion in equivalencias_carrera.items():
-
-            registrar(
-                destino,
-                destino,
-                nivel="DIRECTA",
-                fuente="CARRERA"
+        for destino, alias in equivalencias_carrera.items():
+            equivalencias_combinadas[
+                destino
+            ] = list(
+                alias
+                if isinstance(
+                    alias,
+                    (list, tuple, set)
+                )
+                else [alias]
             )
 
-            # Nuevo formato DIRECTA/ALTA/MEDIA/BAJA
-            if isinstance(configuracion, dict):
-                for nivel in (
-                    "DIRECTA",
-                    "MUY ALTA",
-                    "ALTA",
-                    "MEDIA",
-                    "BAJA"
-                ):
-                    valores = configuracion.get(
-                        nivel,
-                        configuracion.get(
-                            nivel.lower(),
-                            []
-                        )
-                    )
+    for destino, alias in equivalencias_combinadas.items():
 
-                    if not isinstance(
-                        valores,
-                        (list, tuple, set)
-                    ):
-                        valores = [valores] if valores else []
+        destino_n = normalizar(
+            destino
+        )
 
-                    for origen in valores:
-                        registrar(
-                            destino,
-                            origen,
-                            nivel=nivel,
-                            fuente="CARRERA"
-                        )
+        mapa_alias[
+            destino_n
+        ] = {
+            normalizar(
+                item
+            )
+            for item in alias
+        }
 
-            # Formato antiguo destino -> lista
-            else:
-                valores = (
-                    configuracion
-                    if isinstance(
-                        configuracion,
-                        (list, tuple, set)
-                    )
-                    else [configuracion]
-                )
+        mapa_alias[
+            destino_n
+        ].add(
+            destino_n
+        )
 
-                for origen in valores:
-                    registrar(
-                        destino,
-                        origen,
-                        nivel="ALTA",
-                        fuente="CARRERA"
-                    )
+    for destino in estructura_proforma:
 
-    # --------------------------------------------------------
-    # 3) Construir TODAS las combinaciones posibles
-    # --------------------------------------------------------
-    candidatos = []
+        destino_real = destino.get(
+            "curso",
+            ""
+        )
 
-    for destino_idx, destino in enumerate(
-        estructura_proforma or []
-    ):
-        destino_real = destino.get("curso", "")
-        destino_n = normalizar(destino_real)
+        destino_n = normalizar(
+            destino_real
+        )
 
-        if (
-            not destino_n
-            or destino_n in usados_destino
-            or destino_n not in mapa
-        ):
+        if destino_n in usados_destino:
             continue
 
-        for origen_idx, origen_info in enumerate(
-            cursos_alumno or []
-        ):
-            origen_real = origen_info.get("curso", "")
-            origen_n = normalizar(origen_real)
+        alias_destino = mapa_alias.get(
+            destino_n
+        )
 
-            if (
-                not origen_n
-                or origen_n in usados_origen
-            ):
+        if not alias_destino:
+            continue
+
+        candidatos = []
+
+        for origen_info in cursos_alumno:
+
+            origen_real = origen_info.get(
+                "curso",
+                ""
+            )
+
+            origen_n = normalizar(
+                origen_real
+            )
+
+            if origen_n in usados_origen:
                 continue
 
             if son_areas_incompatibles(
@@ -2547,98 +2442,46 @@ def buscar_equivalencias_respaldo(
             ):
                 continue
 
-            meta = mapa[destino_n].get(origen_n)
-            if not meta:
-                continue
+            if origen_n in alias_destino:
 
-            # Bonus pequeño para coincidencia literal exacta.
-            bonus_exacta = (
-                10
-                if origen_n == destino_n
-                else 0
-            )
+                candidatos.append(
+                    origen_info
+                )
 
-            candidatos.append({
-                "destino_idx": destino_idx,
-                "origen_idx": origen_idx,
-                "destino_info": destino,
-                "origen_info": origen_info,
-                "destino_n": destino_n,
-                "origen_n": origen_n,
-                "nivel": meta["nivel"],
-                "puntaje": meta["puntaje"] + bonus_exacta,
-                "fuente": meta["fuente"],
-            })
-
-    # --------------------------------------------------------
-    # 4) Optimización global determinística
-    # --------------------------------------------------------
-    # Primero se asignan relaciones DIRECTAS y de mayor afinidad.
-    # En empates se preserva el orden de la proforma y del certificado.
-    candidatos.sort(
-        key=lambda x: (
-            -x["puntaje"],
-            x["destino_idx"],
-            x["origen_idx"],
-        )
-    )
-
-    resultado = []
-
-    for candidato in candidatos:
-        if candidato["origen_n"] in usados_origen:
+        if not candidatos:
             continue
 
-        if candidato["destino_n"] in usados_destino:
-            continue
-
-        nivel = candidato["nivel"]
-
-        requiere_validacion = nivel in {
-            "MEDIA",
-            "BAJA"
-        }
-
-        if nivel == "DIRECTA":
-            justificacion = (
-                "Equivalencia directa reconocida por las reglas "
-                "académicas específicas de la carrera."
-            )
-        elif nivel in {"MUY ALTA", "ALTA"}:
-            justificacion = (
-                "La asignatura de procedencia presenta una afinidad "
-                "académica alta con la asignatura UPRIT según las "
-                "reglas específicas de la carrera."
-            )
-        elif nivel == "MEDIA":
-            justificacion = (
-                "La asignatura presenta afinidad académica media. "
-                "La equivalencia es razonable, pero se recomienda "
-                "validación académica de contenidos y/o sílabo."
-            )
-        else:
-            justificacion = (
-                "La asignatura presenta afinidad académica baja pero "
-                "defendible. Debe quedar identificada para revisión "
-                "académica antes de la aprobación definitiva."
-            )
+        origen_info = candidatos[
+            0
+        ]
 
         resultado.append(
             crear_equivalencia(
-                destino_info=candidato["destino_info"],
-                origen_info=candidato["origen_info"],
-                afinidad=nivel,
+                destino_info=destino,
+                origen_info=origen_info,
+                afinidad="ALTA",
                 tipo="EQUIVALENCIA DE RESPALDO",
-                requiere_validacion=requiere_validacion,
-                justificacion=justificacion
+                requiere_validacion=True,
+                justificacion=(
+                    "La asignatura de procedencia pertenece a una "
+                    "denominación académicamente compatible con la "
+                    "asignatura UPRIT. Se recomienda validación "
+                    "académica de contenidos y/o sílabo."
+                )
             )
         )
 
         usados_origen.add(
-            candidato["origen_n"]
+            normalizar(
+                origen_info.get(
+                    "curso",
+                    ""
+                )
+            )
         )
+
         usados_destino.add(
-            candidato["destino_n"]
+            destino_n
         )
 
     return resultado
@@ -2801,7 +2644,7 @@ Devuelve exactamente:
     {{
       "curso_origen": "",
       "curso_destino": "",
-      "nivel_afinidad": "ALTA",
+      "nivel_afinidad": "ALTA|MEDIA|BAJA",
       "requiere_validacion": false,
       "justificacion": ""
     }}
@@ -3808,9 +3651,12 @@ REGLAS:
 4. No devuelvas notas.
 5. No rechaces una equivalencia solo porque los créditos sean
    distintos.
-6. Si la relación académica es razonable, puedes marcarla ALTA
-   o MEDIA.
-7. Si es claramente de otra área académica, NO la propongas.
+6. Clasifica cada equivalencia defendible como ALTA, MEDIA o BAJA.
+7. Debes proponer también afinidades BAJAS cuando exista una relación académica real y defendible por área, finalidad formativa, competencia o contenido habitual, aunque los nombres sean diferentes.
+8. Antes de dejar un curso UPRIT sin equivalencia, revisa TODOS los cursos de origen todavía disponibles y elige el mejor candidato defendible.
+9. Maximiza las equivalencias válidas sin reutilizar cursos.
+10. Solo deja un curso sin equivalencia cuando realmente NO tenga relación académica defendible con ningún curso disponible.
+11. Si es claramente de otra área académica, NO la propongas.
 
 BLOQUEOS MÍNIMOS OBLIGATORIOS:
 - Educación Física / Deportes / Actividad Física != Física.
@@ -3990,9 +3836,13 @@ def validar_equivalencias(
             )
         ).strip()
 
+        # Aceptar automáticamente ALTA, MEDIA y BAJA cuando existe
+        # relación académica defendible. Los bloqueos de áreas incompatibles
+        # siguen teniendo prioridad absoluta.
         if nivel not in (
             "ALTA",
-            "MEDIA"
+            "MEDIA",
+            "BAJA"
         ):
             continue
 
@@ -4046,7 +3896,9 @@ def validar_equivalencias(
                 origen_info=curso_real,
                 afinidad=nivel,
                 tipo="EQUIVALENCIA SEMÁNTICA",
-                requiere_validacion=requiere_validacion,
+                requiere_validacion=(
+                    True if nivel == "BAJA" else requiere_validacion
+                ),
                 justificacion=(
                     justificacion
                     or

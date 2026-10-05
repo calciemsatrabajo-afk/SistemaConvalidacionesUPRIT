@@ -9,3 +9,5 @@ python-dotenv
 pytesseract
 Pillow
 openai
+opencv-python-headless
+numpy

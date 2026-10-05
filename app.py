@@ -2919,238 +2919,139 @@ def _buscar_archivo_local(
     carpeta,
     nombre_esperado
 ):
-
-    if not os.path.isdir(
-        carpeta
-    ):
+    """Busca un archivo ignorando mayúsculas/minúsculas y espacios."""
+    if not os.path.isdir(carpeta):
         return None
 
-    esperado = (
-        nombre_esperado
-        .lower()
-        .strip()
-    )
+    esperado = str(nombre_esperado or "").lower().strip()
+    if not esperado:
+        return None
 
-    for nombre in os.listdir(
-        carpeta
-    ):
-
-        if (
-            nombre
-            .lower()
-            .strip()
-            == esperado
-        ):
-
-            return os.path.join(
-                carpeta,
-                nombre
-            )
+    for nombre in os.listdir(carpeta):
+        if nombre.lower().strip() == esperado:
+            return os.path.join(carpeta, nombre)
 
     return None
 
 
-def _cargar_carreras_respaldo(
-    carreras_actuales
-):
+def _primer_archivo_extension(carpeta, extension):
+    """Devuelve el primer archivo de una extensión dentro de una carpeta."""
+    if not os.path.isdir(carpeta):
+        return None
+
+    extension = extension.lower()
+    for nombre in sorted(os.listdir(carpeta)):
+        ruta = os.path.join(carpeta, nombre)
+        if os.path.isfile(ruta) and nombre.lower().endswith(extension):
+            return ruta
+    return None
+
+
+def _cargar_carreras_respaldo(carreras_actuales):
     """
-    Busca configuracion.json de forma RECURSIVA dentro de /Carreras.
+    Carga de forma robusta TODAS las carreras existentes en /Carreras.
 
-    Esto permite estructuras como:
+    Admite:
+    - carreras detectadas por configuracion_carreras.py;
+    - carpetas con configuracion.json;
+    - carpetas que tengan formato.docx aunque no tengan configuracion.json;
+    - estructuras por periodos (2 años, 2.5 años, etc.).
 
-    Carreras/
-        Administración de Empresas/
-            2 años/
-                configuracion.json
-                formato.docx
-                alumnos.xlsx
-            2.5 años/
-                configuracion.json
-                formato.docx
-                alumnos.xlsx
+    Con esto Psicología no desaparece del selector por falta de JSON,
+    tildes, mayúsculas o diferencias en el nombre de la carpeta.
     """
+    carreras = dict(carreras_actuales or {})
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    carpeta_carreras = os.path.join(base_dir, "Carreras")
 
-    carreras = dict(
-        carreras_actuales
-    )
-
-    base_dir = os.path.dirname(
-        os.path.abspath(
-            __file__
-        )
-    )
-
-    carpeta_carreras = os.path.join(
-        base_dir,
-        "Carreras"
-    )
-
-    if not os.path.isdir(
-        carpeta_carreras
-    ):
+    if not os.path.isdir(carpeta_carreras):
         return carreras
 
     nombres_ya_cargados = {
-        _normalizar_nombre_carrera(
-            nombre
-        )
+        _normalizar_nombre_carrera(nombre)
         for nombre in carreras.keys()
     }
 
-    for raiz, _, archivos in os.walk(
-        carpeta_carreras
-    ):
-
-        nombres_archivos = {
-            nombre.lower().strip():
-                nombre
-            for nombre in archivos
-        }
-
-        if "configuracion.json" not in nombres_archivos:
+    for raiz, _, archivos in os.walk(carpeta_carreras):
+        if os.path.abspath(raiz) == os.path.abspath(carpeta_carreras):
             continue
 
-        ruta_config = os.path.join(
-            raiz,
-            nombres_archivos[
-                "configuracion.json"
-            ]
-        )
+        nombres_archivos = {nombre.lower().strip(): nombre for nombre in archivos}
+        ruta_config = None
+        if "configuracion.json" in nombres_archivos:
+            ruta_config = os.path.join(raiz, nombres_archivos["configuracion.json"])
 
-        try:
-            with open(
-                ruta_config,
-                "r",
-                encoding="utf-8-sig"
-            ) as archivo:
-                config = json.load(
-                    archivo
-                )
-        except Exception:
-            config = {}
+        config = {}
+        if ruta_config:
+            try:
+                with open(ruta_config, "r", encoding="utf-8-sig") as archivo:
+                    config = json.load(archivo)
+                if not isinstance(config, dict):
+                    config = {}
+            except Exception:
+                config = {}
 
-        nombre_carpeta = os.path.basename(
-            raiz
-        )
-
-        nombre_carrera = (
-            str(
-                config.get(
-                    "nombre",
-                    nombre_carpeta
-                )
-            ).strip()
-            or nombre_carpeta
-        )
-
-        clave_normalizada = (
-            _normalizar_nombre_carrera(
-                nombre_carrera
-            )
-        )
-
-        if clave_normalizada in nombres_ya_cargados:
-            continue
-
-        nombre_formato = config.get(
-            "formato",
-            "formato.docx"
-        )
-
-        nombre_alumnos = config.get(
-            "archivo_alumnos",
-            "alumnos.xlsx"
-        )
-
+        nombre_formato = str(config.get("formato", "formato.docx") or "formato.docx")
         ruta_formato_local = (
-            _buscar_archivo_local(
-                raiz,
-                nombre_formato
-            )
-            or _buscar_archivo_local(
-                raiz,
-                "formato.docx"
-            )
+            _buscar_archivo_local(raiz, nombre_formato)
+            or _buscar_archivo_local(raiz, "formato.docx")
         )
 
+        # Si no existe JSON ni Word, esta carpeta no representa una carrera/periodo.
+        if not ruta_config and not ruta_formato_local:
+            continue
+
+        nombre_carpeta = os.path.basename(raiz).strip()
+        nombre_padre = os.path.basename(os.path.dirname(raiz)).strip()
+        nombre_carrera = str(config.get("nombre", "") or "").strip()
+
+        if not nombre_carrera:
+            # Para una carpeta tipo Psicología/formato.docx -> Psicología.
+            # Para una carpeta tipo Administración/2.5 años/formato.docx ->
+            # conserva periodo para no mezclarla con Administración 2 años.
+            nombre_norm = _normalizar_nombre_carrera(nombre_carpeta)
+            if re.fullmatch(r"\d+(?:[\.,]\d+)?\s*ANOS?", nombre_norm):
+                nombre_carrera = f"{nombre_padre} - {nombre_carpeta}"
+            else:
+                nombre_carrera = nombre_carpeta
+
+        clave_normalizada = _normalizar_nombre_carrera(nombre_carrera)
+        if not clave_normalizada or clave_normalizada in nombres_ya_cargados:
+            continue
+
+        nombre_alumnos = str(config.get("archivo_alumnos", "alumnos.xlsx") or "alumnos.xlsx")
         ruta_alumnos_local = (
-            _buscar_archivo_local(
-                raiz,
-                nombre_alumnos
-            )
-            or _buscar_archivo_local(
-                raiz,
-                "alumnos.xlsx"
-            )
+            _buscar_archivo_local(raiz, nombre_alumnos)
+            or _buscar_archivo_local(raiz, "alumnos.xlsx")
         )
 
-        config[
-            "nombre"
-        ] = nombre_carrera
+        config["nombre"] = nombre_carrera
+        config["carpeta"] = raiz
+        config["ruta_formato"] = ruta_formato_local or os.path.join(raiz, nombre_formato)
+        config["ruta_alumnos"] = ruta_alumnos_local or os.path.join(raiz, nombre_alumnos)
+        config.setdefault("formato", os.path.basename(config["ruta_formato"]))
+        config.setdefault("archivo_alumnos", nombre_alumnos)
+        config.setdefault("anios_convalidables", "")
+        config.setdefault("ciclos_convalidables", "")
 
-        config[
-            "carpeta"
-        ] = raiz
-
-        config[
-            "ruta_formato"
-        ] = (
-            ruta_formato_local
-            or os.path.join(
-                raiz,
-                nombre_formato
-            )
-        )
-
-        config[
-            "ruta_alumnos"
-        ] = (
-            ruta_alumnos_local
-            or os.path.join(
-                raiz,
-                nombre_alumnos
-            )
-        )
-
-        config.setdefault(
-            "archivo_alumnos",
-            nombre_alumnos
-        )
-
-        config.setdefault(
-            "anios_convalidables",
-            ""
-        )
-
-        config.setdefault(
-            "ciclos_convalidables",
-            ""
-        )
-
-        carreras[
-            nombre_carrera
-        ] = config
-
-        nombres_ya_cargados.add(
-            clave_normalizada
-        )
+        carreras[nombre_carrera] = config
+        nombres_ya_cargados.add(clave_normalizada)
 
     return carreras
 
 
-
-@st.cache_data(show_spinner=False, ttl=60)
 def cargar_carreras_cache():
     """
-    Cachea durante 60 segundos la lectura de la estructura de carreras,
-    configuraciones JSON y rutas de formato/alumnos.
-    Reduce el trabajo repetitivo de Streamlit en cada interacción.
+    Lee las carreras en cada ejecución de Streamlit.
+    No se usa caché aquí para que una carrera recién agregada, como Psicología,
+    aparezca inmediatamente sin esperar ni limpiar manualmente el caché.
     """
-    carreras = obtener_carreras()
+    try:
+        carreras = obtener_carreras() or {}
+    except Exception:
+        carreras = {}
 
-    return _cargar_carreras_respaldo(
-        carreras
-    )
+    return _cargar_carreras_respaldo(carreras)
 
 
 # ============================================================
